@@ -1,4 +1,4 @@
-package main
+package verify
 
 import (
 	"bytes"
@@ -11,9 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"math/big"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +23,7 @@ import (
 const googleOauth2CertsURL = "https://www.googleapis.com/oauth2/v3/certs"
 
 //Max Token Lifetime is one day in seconds
-const maxTokenLifetimeSecs = 86400
+const maxTokenLifetimeSecs = 24 * 60 * 60
 
 //Clock skew - five minutes in seconds
 const clockSkewSecs = 300
@@ -32,69 +32,93 @@ const clockSkewSecs = 300
 var issuers = [2]string{"accounts.google.com", "https://accounts.google.com"}
 
 //The audience to test the jwt against.
-var requiredAud = [...]string{"366667191730-j4fu8pnvc2j1ttkrl1k7ju5n5pim3vet.apps.googleusercontent.com"}
+var requiredAud = [...]string{"366667191730-j4fu8pnvc2j1ttkrl1k7ju5n5pim3vet.apps.googleusercontent.com", "520941011008-51nckhjbudbat3eijf0kl0gequnbr0pl.apps.googleusercontent.com"}
 
-const idToken = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImFlOGU0NmMzN2UzOWMzY2ZiMTgxNWI2YjU4MmM2MTNiOTk0N2MxZTQifQ.eyJpc3MiOiJhY2NvdW50cy5nb29nbGUuY29tIiwiYXRfaGFzaCI6InFmdXFud3NXWWRzLXBzMW1oYkU5cXciLCJhenAiOiIzNjY2NjcxOTE3MzAtajRmdThwbnZjMmoxdHRrcmwxazdqdTVuNXBpbTN2ZXQuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLCJhdWQiOiIzNjY2NjcxOTE3MzAtajRmdThwbnZjMmoxdHRrcmwxazdqdTVuNXBpbTN2ZXQuYXBwcy5nb29nbGV1c2VyY29udGVudC5jb20iLCJzdWIiOiIxMTMzNDAwOTA5MTE5NTQ3NDE2OTYiLCJpYXQiOjEzODMxNDc0MjEsImV4cCI6MTM4MzE1MTMyMX0.Z2NVE5HQxsLXx_zRmG3bxgGPDUv76HffDYvhlU_OpgLDeeIxQnC7cAS2OkAUK-nkDci3rMTM035NeTQUKfHsUziOV_WGyDtuRq_KEBDev0ssr8EeTq0Wg-nYN8eo6nbfKYTtd4UnOMG-xYetyyPIN8SNy3G7P1Aw3CakhbD32I0"
-
-var _certificateExpiray int64
+var _certificateExpiry time.Time
+var _certificateCache *oauth2.Jwk
 
 type Envelope struct {
-	Alg string `json:"alg,omitempty"`
-	Kid string `json:"kid,omitempty"`
+	Alg string `json:"alg"`
+	Kid string `json:"kid"`
 }
 
 type Payload struct {
-	Iss    string `json:"iss,omitempty"`
-	AtHash string `json:"at_hash,omitempty"`
-	Azp    string `json:"azp,omitempty"`
-	Aud    string `json:"aud,omitempty"`
-	Sub    string `json:"sub,omitempty"`
-	Iat    int64  `json:"iat,omitempty"`
-	Exp    int64  `json:"exp,omitempty"`
+	Iss    string `json:"iss"`
+	AtHash string `json:"at_hash"`
+	Azp    string `json:"azp"`
+	Aud    string `json:"aud"`
+	Sub    string `json:"sub"`
+	Iat    int64  `json:"iat"`
+	Exp    int64  `json:"exp"`
 }
 
-//구글API는 v2/certs를 때림
-//v3과 비교했을 때 "n" 끝에 "=="가 더 붙어있음
-func getJwkWithGoogleAPI(httpClient *http.Client) {
-	s, _ := oauth2.New(httpClient)
-	x := s.GetCertForOpenIdConnect()
-	jwk2 := new(oauth2.Jwk)
-	jwk2, _ = x.Do()
-	fmt.Println("\njwk2:", jwk2, "\njwk2.Keys:", jwk2.Keys, "\njwk.Keys[0]", jwk2.Keys[0])
-}
+func (p *Payload) verify() error {
+	now := time.Now().Unix()
 
-func getMillTime() int64 {
-	return time.Now().UnixNano() / int64(time.Millisecond)
-}
-
-func getSecsTime() int64 {
-	return time.Now().UnixNano() / int64(time.Second)
-}
-
-//For debugging purposes
-func verifyForDebugging(idToken string) (*oauth2.Tokeninfo, error) {
-	oauth2Service, err := oauth2.New(&http.Client{})
-	if err != nil {
-		return nil, err
+	if p.Iat == 0 {
+		return errors.New("No issue time in token")
 	}
-	tokenInfoCall := oauth2Service.Tokeninfo()
-	tokenInfoCall.IdToken(idToken)
-	return tokenInfoCall.Do()
+
+	if p.Exp == 0 {
+		return errors.New("No expiration time in token")
+	}
+
+	if p.Exp > now+maxTokenLifetimeSecs {
+		return errors.New("Expiration time too far in future")
+	}
+
+	earliest := p.Iat - clockSkewSecs
+	latest := p.Exp + clockSkewSecs
+
+	if now < earliest {
+		return fmt.Errorf("Token used to early, %v < %v", now, earliest)
+	}
+
+	if now > latest {
+		return fmt.Errorf("Token used to late, %v > %v", now, latest)
+	}
+
+	if p.Iss != issuers[0] && p.Iss != issuers[1] {
+		return fmt.Errorf("Invalid issuer, expected one of [%v, %v] but got %v", issuers[0], issuers[1], p.Iss)
+	}
+
+	for _, rAud := range requiredAud {
+		if p.Aud == rAud {
+			return nil
+		}
+	}
+	return fmt.Errorf("Wrong recipient, payload audience is %v", p.Aud)
 }
+
+// //구글API는 v2/certs를 때림
+// //v3과 비교했을 때 "n" 끝에 "=="가 더 붙어있음
+// func getJwkWithGoogleAPI(httpClient *http.Client) {
+// 	s, _ := oauth2.New(httpClient)
+// 	x := s.GetCertForOpenIdConnect()
+// 	jwk2 := new(oauth2.Jwk)
+// 	jwk2, _ = x.Do()
+// 	fmt.Println("\njwk2:", jwk2, "\njwk2.Keys:", jwk2.Keys, "\njwk.Keys[0]", jwk2.Keys[0])
+// }
+
+// func getIDTokenInfo(accessToken string) (*oauth2.Tokeninfo, error) {
+// 	oauth2Service, err := oauth2.New(&http.Client{})
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	tokenInfoCall := oauth2Service.Tokeninfo()
+// 	tokenInfoCall.AccessToken(accessToken)
+// 	//tokenInfoCall.IdToken(idToken)
+// 	return tokenInfoCall.Do()
+// }
 
 //For production purposes
-func verifyForReal(idToken string) error {
+func verifyIDToken(idToken string) error {
 	jwk, err := getCertsFromGoogle()
 	if err != nil {
 		return err
 	}
 
-	err = verifyIDToken(idToken, jwk.Keys)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	return nil
+	return verify(idToken, jwk.Keys)
 }
 
 func getJwk(body []byte) (*oauth2.Jwk, error) {
@@ -103,30 +127,41 @@ func getJwk(body []byte) (*oauth2.Jwk, error) {
 	return jwk, err
 }
 
+const maxAgeKey = "max-age="
+const maxAgeKeyLen = len("max-age=")
+
 func doCacheControl(cacheControl string) error {
-	var cacheAge int64 = -1
-	var err error
-
-	if cacheControl != "" {
-		b := strings.Index(cacheControl, "max-age=")
-		e := strings.Index(cacheControl[b:], ",")
-		cacheAge, err = strconv.ParseInt(cacheControl[b+8:b+e], 10, 64)
-		if err != nil {
-			return err
-		}
-		cacheAge *= 1000
+	if cacheControl == "" {
+		_certificateExpiry = time.Time{}
+		return nil
 	}
 
-	if _certificateExpiray = -1; cacheAge != -1 {
-		_certificateExpiray = getMillTime() + cacheAge
+	b := strings.Index(cacheControl, maxAgeKey)
+	e := strings.Index(cacheControl[b:], ",")
+	if b == -1 || e == -1 {
+		_certificateExpiry = time.Time{}
+		return nil
 	}
+
+	cacheAge, err := time.ParseDuration(cacheControl[b+maxAgeKeyLen:b+e] + "s")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("cacheAge: %v\n", cacheAge)
+
+	_certificateExpiry := time.Now().Add(cacheAge)
+	fmt.Printf("_certificateExpiry: %v\n", _certificateExpiry)
 
 	return nil
 }
 
 func getCertsFromGoogle() (*oauth2.Jwk, error) {
-	var httpClient = &http.Client{}
-	res, err := httpClient.Get(googleOauth2CertsURL)
+	if !_certificateExpiry.Equal(time.Time{}) && time.Now().Before(_certificateExpiry) && _certificateCache != nil {
+		return _certificateCache, nil
+	}
+
+	fmt.Println("hit google endpoint")
+	res, err := http.Get(googleOauth2CertsURL)
 	if err != nil {
 		return nil, err
 	}
@@ -141,81 +176,28 @@ func getCertsFromGoogle() (*oauth2.Jwk, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("jwk:", jwk, "\njwk.Keys:", jwk.Keys, "\njwk.Keys[0]", jwk.Keys[0])
+	log.Printf("jwk.Keys[0] = %+v", jwk.Keys[0])
 
-	cacheControl := res.Header.Get("cache-control")
-	err = doCacheControl(cacheControl)
-	if err != nil {
+	if err = doCacheControl(res.Header.Get("cache-control")); err != nil {
 		return nil, err
 	}
+	_certificateCache = jwk
 
 	return jwk, nil
 }
 
 func verifyPayload(payload []byte) error {
-	var payloadObj = new(Payload)
-	var payloadStr = string(payload[:])
+	payloadObj := new(Payload)
 	err := json.Unmarshal(payload, &payloadObj)
 	if err != nil {
 		return err
 	}
 	fmt.Println("payloadObj:", payloadObj)
 
-	iat := payloadObj.Iat
-	exp := payloadObj.Exp
-	iss := payloadObj.Iss
-	aud := payloadObj.Aud
-
-	now := getSecsTime()
-	fmt.Println("iat, exp, now:", iat, exp, now)
-
-	if iat == 0 {
-		return errors.New("No issue time in token: " + payloadStr)
-	}
-
-	if exp == 0 {
-		return errors.New("No expiration time in token: " + payloadStr)
-	}
-
-	if exp > now+maxTokenLifetimeSecs {
-		return errors.New("Expiration time too far in future: " + payloadStr)
-	}
-
-	earliest := iat - clockSkewSecs
-	//latest := exp + clockSkewSecs
-
-	if now < earliest {
-		return errors.New("Token used to early, " + strconv.FormatInt(now, 10) + " < " + strconv.FormatInt(earliest, 10) + ":" + payloadStr)
-	}
-
-	// if now > latest {
-	// 	return errors.New("Token used to late, " + strconv.FormatInt(now, 10) + " > " + strconv.FormatInt(latest, 10) + ":" + payloadStr)
-	// }
-
-	if iss != issuers[0] && iss != issuers[1] {
-		return errors.New("Invalid issuer, expected one of [" + issuers[0] + ", " + issuers[1] + "] but got " + iss)
-	}
-
-	audVerified := false
-	for _, rAud := range requiredAud {
-		if aud == rAud {
-			audVerified = true
-			break
-		}
-	}
-	if !audVerified {
-		return errors.New("Wrong recipient, payload audience is " + aud)
-	}
-
-	return nil
+	return payloadObj.verify()
 }
 
 func getPem(keys []*oauth2.JwkKeys, envelope []byte) (*oauth2.JwkKeys, error) {
-	certs := make(map[string]*oauth2.JwkKeys)
-	for _, key := range keys {
-		certs[key.Kid] = key
-	}
-
 	var envelopeObj = new(Envelope)
 	err := json.Unmarshal(envelope, &envelopeObj)
 	if err != nil {
@@ -223,30 +205,25 @@ func getPem(keys []*oauth2.JwkKeys, envelope []byte) (*oauth2.JwkKeys, error) {
 	}
 	fmt.Println("envelopeObj:", envelopeObj)
 
-	envelopeObj.Kid = "3c066add5889b989e9c49803c21fa4b29d1f4ead"
-
-	if certs[envelopeObj.Kid] == nil {
-		return nil, errors.New("No pem found for envelope")
+	for _, key := range keys {
+		if key.Kid == envelopeObj.Kid {
+			return key, nil
+		}
 	}
 
-	return certs[envelopeObj.Kid], nil
+	return nil, errors.New("No pem found for envelope")
 }
 
-func getPublicKey(pemN string, pemE string) (*rsa.PublicKey, error) {
-	decN, err := base64.URLEncoding.DecodeString(pemN)
-	// if err != nil {
-	// 	return err
-	// }
-	fmt.Println("decN:", decN)
+func getPublicKey(pem *oauth2.JwkKeys) (*rsa.PublicKey, error) {
+	decN, err := base64.RawURLEncoding.DecodeString(pem.N)
+	if err != nil {
+		return nil, err
+	}
 	n := big.NewInt(0)
 	n.SetBytes(decN)
 	fmt.Println("n:", n)
 
-	decE, err := base64.URLEncoding.DecodeString(pemE)
-	// if err != nil {
-	// 	return err
-	// }
-	fmt.Println("decE:", decE)
+	decE, err := base64.RawURLEncoding.DecodeString(pem.E)
 
 	var eBytes []byte
 	if len(decE) < 8 {
@@ -267,16 +244,10 @@ func getPublicKey(pemN string, pemE string) (*rsa.PublicKey, error) {
 	return &rsa.PublicKey{N: n, E: int(e)}, nil
 }
 
-func verifyIDToken(token string, keys []*oauth2.JwkKeys) error {
+func verify(token string, keys []*oauth2.JwkKeys) error {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return errors.New("jws: invalid token received, token must have 3 parts")
-	}
-
-	signed := parts[0] + "." + parts[1]
-	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return err
+		return errors.New("jws: invalid token received, token must have 3 parts: " + token)
 	}
 
 	envelope, err := base64.RawURLEncoding.DecodeString(parts[0])
@@ -294,35 +265,33 @@ func verifyIDToken(token string, keys []*oauth2.JwkKeys) error {
 	if len(payload) == 0 {
 		return errors.New("Can't parse token payload")
 	}
-	fmt.Println("payload:", payload, string(payload[:]))
+	fmt.Println("payloadStr:", string(payload[:]))
+
+	signed := parts[0] + "." + parts[1]
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return err
+	}
 
 	pem, err := getPem(keys, envelope)
 	if err != nil {
 		return err
 	}
-	key, err := getPublicKey(pem.N, pem.E)
+	key, err := getPublicKey(pem)
 	if err != nil {
 		return err
 	}
+	fmt.Println("key:", key)
 
 	h := sha256.New()
 	h.Write([]byte(signed))
-	err = rsa.VerifyPKCS1v15(key, crypto.SHA256, h.Sum(nil), []byte(signature))
-	// if err != nil {
-	// 	return errors.New(err + "token: " + token)
-	// }
-
-	err = verifyPayload(payload)
+	err = rsa.VerifyPKCS1v15(key, crypto.SHA256, h.Sum(nil), signature)
 	if err != nil {
 		return err
 	}
 
-	return nil
-}
-
-func main() {
-	err := verifyForReal(idToken)
-	if err != nil {
-		fmt.Println(err)
+	if err := verifyPayload(payload); err != nil {
+		return fmt.Errorf("verify fail: %s: %v", payload, err)
 	}
+	return nil
 }
