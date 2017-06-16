@@ -11,13 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"math/big"
 	"net/http"
 	"strings"
 	"time"
 
 	"google.golang.org/api/oauth2/v2"
+
+	verifier "work/verify"
 )
 
 const googleOauth2CertsURL = "https://www.googleapis.com/oauth2/v3/certs"
@@ -36,6 +37,10 @@ var requiredAud = [...]string{"520941011008-51nckhjbudbat3eijf0kl0gequnbr0pl.app
 
 var _certificateExpiry time.Time
 var _certificateCache *oauth2.Jwk
+
+func init() {
+	verifier.Register("G", verify)
+}
 
 type Envelope struct {
 	Alg string `json:"alg"`
@@ -111,13 +116,13 @@ func (p *Payload) verify() error {
 // 	return tokenInfoCall.Do()
 // }
 
-func verifyIDToken(idToken string) error {
+func verify(idToken string) error {
 	jwk, err := getCertsFromGoogle()
 	if err != nil {
 		return err
 	}
 
-	return verify(idToken, jwk.Keys)
+	return verifyIDToken(idToken, jwk.Keys)
 }
 
 func getJwk(body []byte) (*oauth2.Jwk, error) {
@@ -146,10 +151,8 @@ func doCacheControl(cacheControl string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("cacheAge: %v\n", cacheAge)
 
-	_certificateExpiry := time.Now().Add(cacheAge)
-	fmt.Printf("_certificateExpiry: %v\n", _certificateExpiry)
+	_certificateExpiry = time.Now().Add(cacheAge)
 
 	return nil
 }
@@ -159,7 +162,6 @@ func getCertsFromGoogle() (*oauth2.Jwk, error) {
 		return _certificateCache, nil
 	}
 
-	fmt.Println("hit google endpoint")
 	res, err := http.Get(googleOauth2CertsURL)
 	if err != nil {
 		return nil, err
@@ -175,7 +177,6 @@ func getCertsFromGoogle() (*oauth2.Jwk, error) {
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("jwk.Keys[0] = %+v", jwk.Keys[0])
 
 	if err = doCacheControl(res.Header.Get("cache-control")); err != nil {
 		return nil, err
@@ -191,7 +192,6 @@ func getCert(keys []*oauth2.JwkKeys, envelope []byte) (*oauth2.JwkKeys, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("envelopeObj:", envelopeObj)
 
 	for _, key := range keys {
 		if key.Kid == envelopeObj.Kid {
@@ -209,7 +209,6 @@ func getPublicKey(cert *oauth2.JwkKeys) (*rsa.PublicKey, error) {
 	}
 	n := big.NewInt(0)
 	n.SetBytes(decN)
-	fmt.Println("n:", n)
 
 	decE, err := base64.RawURLEncoding.DecodeString(cert.E)
 
@@ -227,7 +226,6 @@ func getPublicKey(cert *oauth2.JwkKeys) (*rsa.PublicKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("e:", e)
 
 	return &rsa.PublicKey{N: n, E: int(e)}, nil
 }
@@ -238,12 +236,11 @@ func verifyPayload(payload []byte) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("payloadObj:", payloadObj)
 
 	return payloadObj.verify()
 }
 
-func verify(token string, keys []*oauth2.JwkKeys) error {
+func verifyIDToken(token string, keys []*oauth2.JwkKeys) error {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return errors.New("jws: invalid token received, token must have 3 parts: " + token)
@@ -264,7 +261,6 @@ func verify(token string, keys []*oauth2.JwkKeys) error {
 	if len(payload) == 0 {
 		return errors.New("Can't parse token payload")
 	}
-	fmt.Println("payloadStr:", string(payload[:]))
 
 	signed := parts[0] + "." + parts[1]
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
@@ -280,7 +276,6 @@ func verify(token string, keys []*oauth2.JwkKeys) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("key:", key)
 
 	h := sha256.New()
 	h.Write([]byte(signed))

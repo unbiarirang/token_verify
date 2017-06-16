@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	verifier "work/verify"
 )
 
 type Identity struct {
@@ -22,12 +24,15 @@ type Identity struct {
 	BundleID     string `json:"bundle_id"`
 }
 
+func init() {
+	verifier.Register("A", verify)
+}
+
 func verifyPublicKeyURL(u string) error {
 	url, err := url.Parse(u)
 	if err != nil {
 		return err
 	}
-	fmt.Println("##url:", url)
 
 	if url.Scheme != "https" {
 		return fmt.Errorf("It's not https, %v", u)
@@ -60,7 +65,6 @@ func getAppleCertificate(publicKeyURL string) (*x509.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("##body:", string(body))
 
 	cert, err := x509.ParseCertificate([]byte(body))
 	if err != nil {
@@ -94,7 +98,6 @@ func formPayload(playerID string, bundleID string, timestamp uint64, salt []byte
 
 	bigEndianTimestamp := make([]byte, 8)
 	binary.BigEndian.PutUint64(bigEndianTimestamp, timestamp)
-	fmt.Println("##bigEndianTimestamp:", bigEndianTimestamp, "timestamp: ", timestamp)
 
 	written, err = payloadBuffer.Write(bigEndianTimestamp)
 	if err != nil {
@@ -121,7 +124,6 @@ func verify(identityStr string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("identity:", identity)
 
 	cert, err := getAppleCertificate(identity.PublicKeyURL)
 	if err != nil {

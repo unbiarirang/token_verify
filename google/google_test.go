@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-const code = "4/OuBcwDwA063MXz1x3xF5ZIJ7-__8VImJlc0c7EQGvTk"
+const code = "4/bTXnpq0tNw5WjA_OkbhZwRm40wg_I18rG1WHfeDZ7V0"
 
 func TestGoogleVerify(t *testing.T) {
 	tok := readToken()
-	err := verifyIDToken(tok.IDToken)
+	err := verify(tok.IDToken)
 	if err != nil {
 		t.Error(err)
 	}
