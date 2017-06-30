@@ -9,14 +9,15 @@ import (
 	"testing"
 )
 
-const code = "4/bTXnpq0tNw5WjA_OkbhZwRm40wg_I18rG1WHfeDZ7V0"
+const code = "4/atxvXWeLfAiGhPw5rTEr8S1G9HSUneJgXln13m5WvBs"
 
 func TestGoogleVerify(t *testing.T) {
 	tok := readToken()
-	err := verify(tok.IDToken)
+	platformID, err := Verify(tok.IDToken)
 	if err != nil {
 		t.Error(err)
 	}
+	fmt.Println("platformID:", platformID)
 }
 
 func check(e error) {

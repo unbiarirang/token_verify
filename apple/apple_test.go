@@ -1,6 +1,7 @@
 package apple
 
 import "testing"
+import "fmt"
 
 var identity = `{
 "player_id" : "G:123148854",
@@ -12,8 +13,9 @@ var identity = `{
 }`
 
 func TestAppleVerify(t *testing.T) {
-	err := verify(identity)
+	platformID, err := Verify(identity)
 	if err != nil {
-		t.Errorf("error: %v", err)
+		t.Error(err)
 	}
+	fmt.Println("platformID:", platformID)
 }
