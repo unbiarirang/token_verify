@@ -47,7 +47,7 @@ func TestGoogleGetToken(t *testing.T) {
 		"client_id":     {"520941011008-51nckhjbudbat3eijf0kl0gequnbr0pl.apps.googleusercontent.com"},
 		"grant_type":    {"authorization_code"},
 		"redirect_uri":  {"http://localhost"},
-		"client_secret": {"s8J-4xGBWwWICq0rTJF-eypX"},
+		"client_secret": {"client_secret"},
 		"code":          {code},
 		"scope":         {""}})
 
